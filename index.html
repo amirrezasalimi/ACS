@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Cutter Studio</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        studio: { 900: '#0b0f19', 800: '#111827', 700: '#1f2937', 600: '#374151', accent: '#6366f1' }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- CORS Worker Workaround for Single-File FFmpeg.wasm -->
+    <script>
+        const OriginalWorker = window.Worker;
+        window.Worker = function(scriptURL, options) {
+            if (typeof scriptURL === 'string' && scriptURL.startsWith('http')) {
+                const blob = new Blob([`importScripts("${scriptURL}");`], { type: 'application/javascript' });
+                return new OriginalWorker(URL.createObjectURL(blob), options);
+            }
+            return new OriginalWorker(scriptURL, options);
+        };
+    </script>
+
+    <!-- FFmpeg.wasm v0.12 (Single Thread for universal browser support without COOP/COEP headers) -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+    <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+
+    <style>
+        /* Custom Compact Scrollbars & Range Sliders */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #111827; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+
+        input[type=range] {
+            -webkit-appearance: none; background: transparent;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            height: 4px; border-radius: 2px; background: #374151;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none; height: 14px; width: 14px;
+            border-radius: 50%; background: #6366f1; margin-top: -5px; cursor: pointer;
+            transition: transform 0.1s;
+        }
+        input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+        /* WaveSurfer Region Handle Customization */
+        ::part(region-handle) {
+            border-color: #818cf8 !important;
+            width: 4px !important;
+        }
+    </style>
+</head>
+<body class="bg-studio-900 text-slate-200 font-sans min-h-screen flex flex-col justify-center items-center p-2 sm:p-4 select-none">
+
+    <!-- Main Studio Container -->
+    <div class="w-full max-w-4xl bg-studio-800 border border-studio-700 rounded-xl shadow-2xl overflow-hidden flex flex-col">
+
+        <!-- Top Bar -->
+        <header class="bg-studio-900/60 px-4 py-2.5 border-b border-studio-700 flex justify-between items-center">
+            <div class="flex items-center space-x-2">
+                <i data-lucide="Scissors" class="w-5 h-5 text-indigo-400"></i>
+                <h1 class="font-bold text-sm tracking-wide text-slate-100">AUDIO CUTTER <span class="text-xs font-normal text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded">STUDIO</span></h1>
+            </div>
+
+            <div class="flex items-center space-x-3">
+                <!-- Engine Status -->
+                <div id="ffmpeg-status" class="flex items-center space-x-1.5 text-xs bg-studio-700/60 px-2.5 py-1 rounded-full">
+                    <span id="status-dot" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                    <span id="status-text" class="text-slate-300">Loading Engine...</span>
+                </div>
+
+                <!-- Replace File Button (Hidden initially) -->
+                <button id="btn-new-file" onclick="document.getElementById('file-input').click()" class="hidden text-xs bg-studio-700 hover:bg-studio-600 text-slate-200 px-2.5 py-1 rounded-md transition flex items-center space-x-1">
+                    <i data-lucide="folder-open" class="w-3.5 h-3.5"></i>
+                    <span>Open Audio</span>
+                </button>
+                <input type="file" id="file-input" accept="audio/*,video/*" class="hidden">
+            </div>
+        </header>
+
+        <!-- Dropzone (Shown when no file loaded) -->
+        <div id="dropzone" onclick="document.getElementById('file-input').click()" class="p-12 flex flex-col items-center justify-center border-2 border-dashed border-studio-600 hover:border-indigo-500 rounded-lg m-4 cursor-pointer transition-all bg-studio-900/30 hover:bg-studio-900/60 group">
+            <div class="w-12 h-12 rounded-full bg-indigo-500/10 group-hover:bg-indigo-500/20 flex items-center justify-center mb-3 transition">
+                <i data-lucide="upload-cloud" class="w-6 h-6 text-indigo-400"></i>
+            </div>
+            <p class="text-sm font-medium text-slate-200 mb-1">Click or drop an audio/video file here</p>
+            <p class="text-xs text-slate-400">Supports MP3, WAV, FLAC, M4A, OGG, MP4, and more</p>
+        </div>
+
+        <!-- Editor Workspace (Hidden until file loaded) -->
+        <div id="workspace" class="hidden flex-col">
+
+            <!-- File Info & Time Readout Bar -->
+            <div class="px-4 py-2 bg-studio-800 border-b border-studio-700 flex flex-wrap justify-between items-center text-xs gap-2">
+                <div class="flex items-center space-x-2 truncate max-w-xs sm:max-w-md">
+                    <i data-lucide="music" class="w-4 h-4 text-slate-400 shrink-0"></i>
+                    <span id="file-name" class="font-medium text-slate-200 truncate">track.mp3</span>
+                    <span id="file-meta" class="text-slate-500 shrink-0"></span>
+                </div>
+                <div class="flex items-center space-x-4 font-mono text-xs">
+                    <div><span class="text-slate-500">CURSOR:</span> <span id="time-cursor" class="text-slate-200">00:00.00</span></div>
+                    <div><span class="text-slate-500">TOTAL:</span> <span id="time-total" class="text-slate-400">00:00.00</span></div>
+                </div>
+            </div>
+
+            <!-- Waveform Container -->
+            <div class="relative bg-studio-900/90 border-b border-studio-700">
+                <!-- Loading Overlay for Waveform -->
+                <div id="wave-loader" class="absolute inset-0 bg-studio-900/80 z-20 flex items-center justify-center space-x-2">
+                    <i data-lucide="loader-2" class="w-5 h-5 text-indigo-400 animate-spin"></i>
+                    <span class="text-xs font-medium text-slate-300">Decoding Waveform...</span>
+                </div>
+
+                <div id="waveform" class="w-full h-36"></div>
+                <div id="wave-timeline" class="w-full h-5 bg-studio-900 border-t border-studio-800"></div>
+            </div>
+
+            <!-- Transport & Region Controls -->
+            <div class="p-3 bg-studio-800 border-b border-studio-700 grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+
+                <!-- Playback Controls (4 cols) -->
+                <div class="md:col-span-4 flex items-center space-x-1.5">
+                    <button id="btn-play-pause" title="Play/Pause (Space)" class="p-2 bg-slate-100 hover:bg-white text-studio-900 rounded-lg transition shadow">
+                        <i data-lucide="play" id="icon-play" class="w-4 h-4 fill-current"></i>
+                    </button>
+                    <button id="btn-play-region" title="Play Selected Region" class="px-2.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center space-x-1 text-xs font-medium shadow">
+                        <i data-lucide="step-forward" class="w-3.5 h-3.5"></i>
+                        <span>Play Cut</span>
+                    </button>
+                    <button id="btn-loop" title="Toggle Loop Selection" class="p-2 bg-studio-700 hover:bg-studio-600 text-slate-300 rounded-lg transition border border-transparent">
+                        <i data-lucide="repeat" class="w-4 h-4"></i>
+                    </button>
+
+                    <!-- Volume -->
+                    <div class="flex items-center space-x-1.5 pl-2">
+                        <button id="btn-mute" class="text-slate-400 hover:text-slate-200">
+                            <i data-lucide="volume-2" id="icon-vol" class="w-4 h-4"></i>
+                        </button>
+                        <input type="range" id="slider-vol" min="0" max="1" step="0.05" value="1" class="w-16">
+                    </div>
+                </div>
+
+                <!-- Fine Trim Controls (5 cols) -->
+                <div class="md:col-span-5 flex items-center justify-center space-x-2 bg-studio-900/60 p-1.5 rounded-lg border border-studio-700/60">
+                    <div class="flex flex-col">
+                        <label class="text-[10px] text-slate-400 font-semibold uppercase px-1 flex justify-between">
+                            <span>Start (s)</span>
+                            <button onclick="setRegionToCursor('start')" class="text-indigo-400 hover:underline" title="Set Start to Cursor">[In]</button>
+                        </label>
+                        <input type="number" id="input-start" step="0.05" min="0" class="bg-studio-800 text-slate-100 font-mono text-xs px-2 py-1 rounded border border-studio-600 focus:border-indigo-500 focus:outline-none w-24">
+                    </div>
+
+                    <div class="flex flex-col items-center justify-center px-1">
+                        <span class="text-[10px] text-slate-500 uppercase">Length</span>
+                        <span id="region-duration" class="font-mono text-xs text-indigo-400 font-medium">0.00s</span>
+                    </div>
+
+                    <div class="flex flex-col">
+                        <label class="text-[10px] text-slate-400 font-semibold uppercase px-1 flex justify-between">
+                            <span>End (s)</span>
+                            <button onclick="setRegionToCursor('end')" class="text-indigo-400 hover:underline" title="Set End to Cursor">[Out]</button>
+                        </label>
+                        <input type="number" id="input-end" step="0.05" min="0" class="bg-studio-800 text-slate-100 font-mono text-xs px-2 py-1 rounded border border-studio-600 focus:border-indigo-500 focus:outline-none w-24">
+                    </div>
+                </div>
+
+                <!-- Zoom Controls (3 cols) -->
+                <div class="md:col-span-3 flex items-center justify-end space-x-2">
+                    <i data-lucide="zoom-out" class="w-3.5 h-3.5 text-slate-400"></i>
+                    <input type="range" id="slider-zoom" min="1" max="200" value="1" class="w-24 sm:w-28">
+                    <i data-lucide="zoom-in" class="w-3.5 h-3.5 text-slate-400"></i>
+                </div>
+            </div>
+
+            <!-- Studio Effects & Export Deck -->
+            <div class="p-3 bg-studio-900/40 flex flex-wrap justify-between items-center gap-4">
+
+                <!-- Audio Effects (FX) -->
+                <div class="flex flex-wrap items-center gap-3 text-xs">
+                    <span class="text-slate-500 font-semibold uppercase tracking-wider text-[10px] flex items-center gap-1">
+                        <i data-lucide="sliders" class="w-3 h-3"></i> FX:
+                    </span>
+
+                    <div class="flex items-center space-x-1 bg-studio-800 px-2 py-1 rounded border border-studio-700">
+                        <label class="text-slate-400">Fade In:</label>
+                        <select id="fx-fade-in" class="bg-transparent text-slate-200 font-medium focus:outline-none cursor-pointer">
+                            <option class="bg-studio-800" value="0">None</option>
+                            <option class="bg-studio-800" value="0.5">0.5s</option>
+                            <option class="bg-studio-800" value="1">1.0s</option>
+                            <option class="bg-studio-800" value="2">2.0s</option>
+                            <option class="bg-studio-800" value="3">3.0s</option>
+                        </select>
+                    </div>
+
+                    <div class="flex items-center space-x-1 bg-studio-800 px-2 py-1 rounded border border-studio-700">
+                        <label class="text-slate-400">Fade Out:</label>
+                        <select id="fx-fade-out" class="bg-transparent text-slate-200 font-medium focus:outline-none cursor-pointer">
+                            <option class="bg-studio-800" value="0">None</option>
+                            <option class="bg-studio-800" value="0.5">0.5s</option>
+                            <option class="bg-studio-800" value="1">1.0s</option>
+                            <option class="bg-studio-800" value="2">2.0s</option>
+                            <option class="bg-studio-800" value="3">3.0s</option>
+                        </select>
+                    </div>
+
+                    <div class="flex items-center space-x-1 bg-studio-800 px-2 py-1 rounded border border-studio-700">
+                        <label class="text-slate-400">Gain:</label>
+                        <select id="fx-volume" class="bg-transparent text-slate-200 font-medium focus:outline-none cursor-pointer">
+                            <option class="bg-studio-800" value="1">100% (0dB)</option>
+                            <option class="bg-studio-800" value="1.5">150% (+3.5dB)</option>
+                            <option class="bg-studio-800" value="2">200% (+6dB)</option>
+                            <option class="bg-studio-800" value="0.5">50% (-6dB)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Export Controls -->
+                <div class="flex items-center space-x-2 ml-auto">
+                    <!-- Speed Mode Badge -->
+                    <span id="mode-badge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium flex items-center gap-1" title="Lossless instant stream copy (No re-encoding)">
+                        <i data-lucide="zap" class="w-3 h-3"></i> Turbo Cut
+                    </span>
+
+                    <!-- Format Selector -->
+                    <div class="flex items-center bg-studio-800 border border-studio-600 rounded-lg px-2 py-1.5 text-xs">
+                        <span class="text-slate-400 mr-1.5">Format:</span>
+                        <select id="export-format" class="bg-transparent text-slate-100 font-semibold focus:outline-none cursor-pointer">
+                            <option class="bg-studio-800" value="copy">Original (Fastest)</option>
+                            <option class="bg-studio-800" value="mp3">MP3 (192kbps)</option>
+                            <option class="bg-studio-800" value="wav">WAV (Lossless)</option>
+                            <option class="bg-studio-800" value="ogg">OGG (Vorbis)</option>
+                            <option class="bg-studio-800" value="m4a">AAC / M4A</option>
+                            <option class="bg-studio-800" value="flac">FLAC</option>
+                        </select>
+                    </div>
+
+                    <!-- Cut & Download Button -->
+                    <button id="btn-export" class="bg-indigo-600 hover:bg-indigo-500 disabled:bg-studio-600 disabled:text-slate-400 text-white text-xs font-semibold px-4 py-2 rounded-lg shadow-lg shadow-indigo-600/20 transition flex items-center space-x-1.5">
+                        <i data-lucide="download" class="w-4 h-4"></i>
+                        <span>Cut & Save</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Progress Bar Footer (Hidden until exporting) -->
+            <div id="export-progress-container" class="hidden bg-studio-900 px-4 py-2 border-t border-studio-700 flex items-center justify-between text-xs">
+                <div class="flex items-center space-x-2">
+                    <i data-lucide="cog" class="w-4 h-4 text-indigo-400 animate-spin"></i>
+                    <span id="export-status-text" class="text-slate-300">Processing audio...</span>
+                </div>
+                <div class="w-48 bg-studio-700 rounded-full h-2 overflow-hidden">
+                    <div id="export-progress-bar" class="bg-indigo-500 h-full w-0 transition-all duration-150"></div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Shortcuts Footer -->
+    <div class="mt-3 text-[11px] text-slate-500 flex space-x-4">
+        <span><kbd class="bg-studio-800 border border-studio-700 px-1.5 py-0.5 rounded text-slate-400">Space</kbd> Play/Pause</span>
+        <span><kbd class="bg-studio-800 border border-studio-700 px-1.5 py-0.5 rounded text-slate-400">Drag Region</kbd> Trim</span>
+        <span>100% Client-Side (Privacy First)</span>
+    </div>
+
+    <!-- Main Application Logic (ES Module for WaveSurfer v7) -->
+    <script type="module">
+        import WaveSurfer from 'https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.esm.js';
+        import RegionsPlugin from 'https://unpkg.com/wavesurfer.js@7/dist/plugins/regions.esm.js';
+        import TimelinePlugin from 'https://unpkg.com/wavesurfer.js@7/dist/plugins/timeline.esm.js';
+
+        // Initialize Icons
+        lucide.createIcons();
+
+        // --- App State ---
+        let wavesurfer = null;
+        let wsRegions = null;
+        let activeRegion = null;
+        let currentFile = null;
+        let isLooping = false;
+        let ffmpeg = null;
+        let ffmpegLoaded = false;
+
+        // --- DOM Elements ---
+        const els = {
+            dropzone: document.getElementById('dropzone'),
+            workspace: document.getElementById('workspace'),
+            fileInput: document.getElementById('file-input'),
+            btnNewFile: document.getElementById('btn-new-file'),
+            fileName: document.getElementById('file-name'),
+            fileMeta: document.getElementById('file-meta'),
+            waveLoader: document.getElementById('wave-loader'),
+            timeCursor: document.getElementById('time-cursor'),
+            timeTotal: document.getElementById('time-total'),
+            btnPlayPause: document.getElementById('btn-play-pause'),
+            iconPlay: document.getElementById('icon-play'),
+            btnPlayRegion: document.getElementById('btn-play-region'),
+            btnLoop: document.getElementById('btn-loop'),
+            btnMute: document.getElementById('btn-mute'),
+            iconVol: document.getElementById('icon-vol'),
+            sliderVol: document.getElementById('slider-vol'),
+            sliderZoom: document.getElementById('slider-zoom'),
+            inputStart: document.getElementById('input-start'),
+            inputEnd: document.getElementById('input-end'),
+            regionDuration: document.getElementById('region-duration'),
+            fxFadeIn: document.getElementById('fx-fade-in'),
+            fxFadeOut: document.getElementById('fx-fade-out'),
+            fxVolume: document.getElementById('fx-volume'),
+            exportFormat: document.getElementById('export-format'),
+            modeBadge: document.getElementById('mode-badge'),
+            btnExport: document.getElementById('btn-export'),
+            progressContainer: document.getElementById('export-progress-container'),
+            progressBar: document.getElementById('export-progress-bar'),
+            progressText: document.getElementById('export-status-text'),
+            statusDot: document.getElementById('status-dot'),
+            statusText: document.getElementById('status-text'),
+        };
+
+        // --- Utility Functions ---
+        const formatTime = (seconds) => {
+            if (isNaN(seconds)) return "00:00.00";
+            const mins = Math.floor(seconds / 60);
+            const secs = (seconds % 60).toFixed(2);
+            return `${mins.toString().padStart(2, '0')}:${secs.padStart(5, '0')}`;
+        };
+
+        const formatBytes = (bytes) => {
+            if (bytes === 0) return '0 B';
+            const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        };
+
+        const getFileExtension = (filename) => {
+            return filename.slice((filename.lastIndexOf(".") - 1 >>> 0) + 2).toLowerCase();
+        };
+
+        // --- Initialize FFmpeg.wasm ---
+        async function initFFmpeg() {
+            try {
+                const { FFmpeg } = window.FFmpegWASM;
+                const { toBlobURL } = window.FFmpegUtil;
+
+                ffmpeg = new FFmpeg();
+
+                const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                await ffmpeg.load({
+                    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+                });
+
+                ffmpegLoaded = true;
+                els.statusDot.className = "w-2 h-2 rounded-full bg-emerald-400";
+                els.statusText.textContent = "FFmpeg Ready";
+            } catch (err) {
+                console.error("FFmpeg Load Error:", err);
+                els.statusDot.className = "w-2 h-2 rounded-full bg-rose-500";
+                els.statusText.textContent = "Engine Error";
+            }
+        }
+        initFFmpeg();
+
+        // --- Initialize WaveSurfer ---
+        function initWaveSurfer() {
+            if (wavesurfer) wavesurfer.destroy();
+
+            wsRegions = RegionsPlugin.create();
+            const wsTimeline = TimelinePlugin.create({
+                container: '#wave-timeline',
+                style: { fontSize: '10px', color: '#64748b' }
+            });
+
+            wavesurfer = WaveSurfer.create({
+                container: '#waveform',
+                waveColor: '#475569',
+                progressColor: '#818cf8',
+                cursorColor: '#f43f5e',
+                cursorWidth: 2,
+                height: 144,
+                normalize: true,
+                barWidth: 2,
+                barGap: 1,
+                barRadius: 2,
+                plugins: [wsRegions, wsTimeline]
+            });
+
+            // WaveSurfer Events
+            wavesurfer.on('ready', (duration) => {
+                els.waveLoader.classList.add('hidden');
+                els.timeTotal.textContent = formatTime(duration);
+
+                // Create default cut region (10% to 90% of track)
+                wsRegions.clearRegions();
+                const start = duration * 0.1;
+                const end = duration * 0.9;
+                activeRegion = wsRegions.addRegion({
+                    start: start,
+                    end: end,
+                    color: 'rgba(99, 102, 241, 0.25)',
+                    drag: true,
+                    resize: true,
+                });
+                updateRegionInputs(start, end);
+            });
+
+            wavesurfer.on('timeupdate', (currentTime) => {
+                els.timeCursor.textContent = formatTime(currentTime);
+            });
+
+            wavesurfer.on('play', () => {
+                els.iconPlay.setAttribute('data-lucide', 'pause');
+                lucide.createIcons();
+            });
+
+            wavesurfer.on('pause', () => {
+                els.iconPlay.setAttribute('data-lucide', 'play');
+                lucide.createIcons();
+            });
+
+            // Region Events
+            wsRegions.on('region-updated', (region) => {
+                activeRegion = region;
+                updateRegionInputs(region.start, region.end);
+            });
+
+            wsRegions.on('region-out', (region) => {
+                if (isLooping && wavesurfer.isPlaying()) {
+                    region.play();
+                }
+            });
+
+            wsRegions.on('region-clicked', (region, e) => {
+                e.stopPropagation();
+                activeRegion = region;
+                region.play();
+            });
+        }
+
+        // --- Sync Region & Inputs ---
+        function updateRegionInputs(start, end) {
+            els.inputStart.value = start.toFixed(2);
+            els.inputEnd.value = end.toFixed(2);
+            els.regionDuration.textContent = (end - start).toFixed(2) + 's';
+        }
+
+        window.setRegionToCursor = (edge) => {
+            if (!wavesurfer || !activeRegion) return;
+            const cur = wavesurfer.getCurrentTime();
+            if (edge === 'start' && cur < activeRegion.end) {
+                activeRegion.setOptions({ start: cur });
+                updateRegionInputs(cur, activeRegion.end);
+            } else if (edge === 'end' && cur > activeRegion.start) {
+                activeRegion.setOptions({ end: cur });
+                updateRegionInputs(activeRegion.start, cur);
+            }
+        };
+
+        [els.inputStart, els.inputEnd].forEach(input => {
+            input.addEventListener('change', () => {
+                if (!activeRegion || !wavesurfer) return;
+                let s = parseFloat(els.inputStart.value);
+                let e = parseFloat(els.inputEnd.value);
+                const max = wavesurfer.getDuration();
+
+                s = Math.max(0, Math.min(s, e - 0.1));
+                e = Math.min(max, Math.max(e, s + 0.1));
+
+                activeRegion.setOptions({ start: s, end: e });
+                updateRegionInputs(s, e);
+            });
+        });
+
+        // --- File Loading ---
+        function handleFile(file) {
+            if (!file) return;
+            currentFile = file;
+
+            els.dropzone.classList.add('hidden');
+            els.workspace.classList.remove('hidden');
+            els.workspace.classList.add('flex');
+            els.btnNewFile.classList.remove('hidden');
+            els.waveLoader.classList.remove('hidden');
+
+            els.fileName.textContent = file.name;
+            els.fileMeta.textContent = `(${formatBytes(file.size)})`;
+            els.sliderZoom.value = 1;
+
+            initWaveSurfer();
+            const objectUrl = URL.createObjectURL(file);
+            wavesurfer.load(objectUrl);
+            checkProcessingMode();
+        }
+
+        els.fileInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
+
+        // Drag & Drop
+        document.body.addEventListener('dragover', (e) => { e.preventDefault(); });
+        document.body.addEventListener('drop', (e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+        });
+
+        // --- UI Controls ---
+        els.btnPlayPause.addEventListener('click', () => wavesurfer && wavesurfer.playPause());
+
+        els.btnPlayRegion.addEventListener('click', () => {
+            if (activeRegion) activeRegion.play();
+        });
+
+        els.btnLoop.addEventListener('click', () => {
+            isLooping = !isLooping;
+            els.btnLoop.classList.toggle('text-indigo-400', isLooping);
+            els.btnLoop.classList.toggle('border-indigo-500/50', isLooping);
+            els.btnLoop.classList.toggle('bg-indigo-500/10', isLooping);
+        });
+
+        els.sliderVol.addEventListener('input', (e) => {
+            if (!wavesurfer) return;
+            const v = parseFloat(e.target.value);
+            wavesurfer.setVolume(v);
+            els.iconVol.setAttribute('data-lucide', v === 0 ? 'volume-x' : v < 0.5 ? 'volume-1' : 'volume-2');
+            lucide.createIcons();
+        });
+
+        els.btnMute.addEventListener('click', () => {
+            if (!wavesurfer) return;
+            const muted = wavesurfer.getMuted();
+            wavesurfer.setMuted(!muted);
+            els.sliderVol.value = !muted ? 0 : 1;
+            els.iconVol.setAttribute('data-lucide', !muted ? 'volume-x' : 'volume-2');
+            lucide.createIcons();
+        });
+
+        els.sliderZoom.addEventListener('input', (e) => {
+            if (wavesurfer) wavesurfer.zoom(Number(e.target.value));
+        });
+
+        // Keyboard Shortcuts
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space' && document.activeElement.tagName !== 'INPUT') {
+                e.preventDefault();
+                wavesurfer && wavesurfer.playPause();
+            }
+        });
+
+        // --- Smart Mode Detection (Turbo Copy vs Re-encode) ---
+        function checkProcessingMode() {
+            const hasFX = els.fxFadeIn.value !== "0" || els.fxFadeOut.value !== "0" || els.fxVolume.value !== "1";
+            const isCopyFormat = els.exportFormat.value === "copy";
+
+            if (!hasFX && isCopyFormat) {
+                els.modeBadge.className = "text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium flex items-center gap-1";
+                els.modeBadge.innerHTML = `<i data-lucide="zap" class="w-3 h-3"></i> Turbo Cut`;
+                els.modeBadge.title = "Lossless instant stream copy (No re-encoding)";
+            } else {
+                els.modeBadge.className = "text-[10px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium flex items-center gap-1";
+                els.modeBadge.innerHTML = `<i data-lucide="cpu" class="w-3 h-3"></i> Studio Encode`;
+                els.modeBadge.title = "Re-encoding audio to apply effects or new format";
+            }
+            lucide.createIcons();
+        }
+
+        [els.fxFadeIn, els.fxFadeOut, els.fxVolume, els.exportFormat].forEach(el => {
+            el.addEventListener('change', checkProcessingMode);
+        });
+
+        // --- FFmpeg Export / Cut Logic ---
+        els.btnExport.addEventListener('click', async () => {
+            if (!ffmpegLoaded) {
+                alert("FFmpeg engine is still loading. Please wait a moment.");
+                return;
+            }
+            if (!currentFile || !activeRegion) return;
+
+            const { fetchFile } = window.FFmpegUtil;
+            const start = activeRegion.start;
+            const end = activeRegion.end;
+            const duration = end - start;
+
+            const fadeIn = parseFloat(els.fxFadeIn.value);
+            const fadeOut = parseFloat(els.fxFadeOut.value);
+            const volume = parseFloat(els.fxVolume.value);
+            const hasFX = fadeIn > 0 || fadeOut > 0 || volume !== 1;
+
+            const origExt = getFileExtension(currentFile.name) || 'mp3';
+            let targetFormat = els.exportFormat.value;
+            const isStreamCopy = (targetFormat === 'copy' && !hasFX);
+
+            // Determine output extension
+            if (targetFormat === 'copy') {
+                // If video container was uploaded, default to mp3 when re-encoding, else keep original
+                targetFormat = ['mp4', 'webm', 'mov', 'mkv'].includes(origExt) ? (hasFX ? 'mp3' : origExt) : origExt;
+            }
+
+            const inputName = `input.${origExt}`;
+            const outputName = `output.${targetFormat}`;
+
+            // UI Lock
+            els.btnExport.disabled = true;
+            els.progressContainer.classList.remove('hidden');
+            els.progressBar.style.width = '5%';
+            els.progressText.textContent = isStreamCopy ? 'Executing Turbo Cut...' : 'Encoding Audio...';
+
+            // Progress Listener
+            const onProgress = ({ time }) => {
+                // time is in microseconds
+                const currentSec = time / 1000000;
+                const percent = Math.min(100, Math.max(5, Math.round((currentSec / duration) * 100)));
+                els.progressBar.style.width = `${percent}%`;
+                els.progressText.textContent = `Processing... ${percent}%`;
+            };
+            ffmpeg.on('progress', onProgress);
+
+            try {
+                // Write file to memory
+                await ffmpeg.writeFile(inputName, await fetchFile(currentFile));
+
+                // Build FFmpeg Command
+                // Placing -ss and -to BEFORE -i uses fast input seeking and resets internal timestamps to 0
+                let args = [
+                    '-ss', start.toFixed(3),
+                    '-to', end.toFixed(3),
+                    '-i', inputName,
+                    '-vn' // Strip any video track
+                ];
+
+                if (isStreamCopy) {
+                    args.push('-c', 'copy');
+                } else {
+                    // Build Audio Filters (-af)
+                    let filters = [];
+                    if (volume !== 1) filters.push(`volume=${volume}`);
+                    if (fadeIn > 0) filters.push(`afade=t=in:st=0:d=${ Math.min(fadeIn, duration) }`);
+                    if (fadeOut > 0) {
+                        const fadeOutStart = Math.max(0, duration - fadeOut);
+                        filters.push(`afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${ Math.min(fadeOut, duration) }`);
+                    }
+                    if (filters.length > 0) {
+                        args.push('-af', filters.join(','));
+                    }
+
+                    // Codec Specifics for optimal speed & quality
+                    if (targetFormat === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', '192k');
+                    else if (targetFormat === 'ogg') args.push('-c:a', 'libvorbis', '-q:a', '5');
+                    else if (targetFormat === 'm4a') args.push('-c:a', 'aac', '-b:a', '192k');
+                    else if (targetFormat === 'flac') args.push('-c:a', 'flac');
+                    else if (targetFormat === 'wav') args.push('-c:a', 'pcm_s16le');
+                }
+
+                args.push(outputName);
+
+                // Run FFmpeg
+                await ffmpeg.exec(args);
+
+                // Read result & trigger download
+                const data = await ffmpeg.readFile(outputName);
+                const blob = new Blob([data.buffer], { type: `audio/${targetFormat}` });
+                const url = URL.createObjectURL(blob);
+
+                const baseName = currentFile.name.substring(0, currentFile.name.lastIndexOf('.')) || currentFile.name;
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${baseName}_cut_${Math.floor(start)}-${Math.floor(end)}.${targetFormat}`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+
+                // Cleanup virtual filesystem to prevent memory leaks
+                await ffmpeg.deleteFile(inputName);
+                await ffmpeg.deleteFile(outputName);
+
+                els.progressBar.style.width = '100%';
+                els.progressText.textContent = 'Done!';
+                setTimeout(() => els.progressContainer.classList.add('hidden'), 1500);
+
+            } catch (error) {
+                console.error("FFmpeg Processing Error:", error);
+                alert("An error occurred while cutting the audio. Try selecting a specific output format like MP3 or WAV.");
+                els.progressContainer.classList.add('hidden');
+            } finally {
+                ffmpeg.off('progress', onProgress);
+                els.btnExport.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
