@@ -23,12 +23,14 @@
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
 
-    <!-- CORS Worker Workaround for Single-File FFmpeg.wasm -->
+    <!-- Load FFmpeg's cross-origin worker through a same-origin Blob URL. -->
     <script>
         const OriginalWorker = window.Worker;
         window.Worker = function(scriptURL, options) {
-            if (typeof scriptURL === 'string' && scriptURL.startsWith('http')) {
-                const blob = new Blob([`importScripts("${scriptURL}");`], { type: 'application/javascript' });
+            const workerURL = scriptURL instanceof URL ? scriptURL.href : String(scriptURL);
+            if (/^https?:\/\//i.test(workerURL) && new URL(workerURL, window.location.href).origin !== window.location.origin) {
+                const escapedURL = JSON.stringify(workerURL);
+                const blob = new Blob([`importScripts(${escapedURL});`], { type: 'application/javascript' });
                 return new OriginalWorker(URL.createObjectURL(blob), options);
             }
             return new OriginalWorker(scriptURL, options);
