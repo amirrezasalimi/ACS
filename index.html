@@ -85,6 +85,16 @@
                     <span id="status-text" class="text-slate-300">Loading Engine...</span>
                 </div>
 
+                <div id="ffmpeg-load-progress" class="hidden w-28 sm:w-36" role="status" aria-live="polite">
+                    <div class="flex justify-between text-[10px] text-slate-400 mb-1">
+                        <span id="ffmpeg-load-label">Loading FFmpeg</span>
+                        <span id="ffmpeg-load-percent">0%</span>
+                    </div>
+                    <div class="h-1 bg-studio-700 rounded-full overflow-hidden">
+                        <div id="ffmpeg-load-bar" class="h-full w-0 bg-indigo-400 transition-all duration-200"></div>
+                    </div>
+                </div>
+
                 <!-- Replace File Button (Hidden initially) -->
                 <button id="btn-new-file" onclick="document.getElementById('file-input').click()" class="hidden text-xs bg-studio-700 hover:bg-studio-600 text-slate-200 px-2.5 py-1 rounded-md transition flex items-center space-x-1">
                     <i data-lucide="folder-open" class="w-3.5 h-3.5"></i>
@@ -330,6 +340,10 @@
             progressText: document.getElementById('export-status-text'),
             statusDot: document.getElementById('status-dot'),
             statusText: document.getElementById('status-text'),
+            ffmpegLoadProgress: document.getElementById('ffmpeg-load-progress'),
+            ffmpegLoadLabel: document.getElementById('ffmpeg-load-label'),
+            ffmpegLoadPercent: document.getElementById('ffmpeg-load-percent'),
+            ffmpegLoadBar: document.getElementById('ffmpeg-load-bar'),
         };
 
         // --- Utility Functions ---
@@ -355,21 +369,55 @@
         async function initFFmpeg() {
             try {
                 const { FFmpeg } = window.FFmpegWASM;
-                const { toBlobURL } = window.FFmpegUtil;
-
                 ffmpeg = new FFmpeg();
 
+                els.ffmpegLoadProgress.classList.remove('hidden');
+
                 const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                const loadAsset = async (url, type, label, start, span) => {
+                    els.ffmpegLoadLabel.textContent = label;
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error(`Could not download ${label}`);
+                    const total = Number(response.headers.get('content-length'));
+                    if (!response.body || !total) {
+                        const blob = await response.blob();
+                        els.ffmpegLoadPercent.textContent = `${start + span}%`;
+                        els.ffmpegLoadBar.style.width = `${start + span}%`;
+                        return URL.createObjectURL(new Blob([blob], { type }));
+                    }
+                    const reader = response.body.getReader();
+                    const chunks = [];
+                    let received = 0;
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value);
+                        received += value.length;
+                        const percent = Math.min(99, Math.round(start + (received / total) * span));
+                        els.ffmpegLoadPercent.textContent = `${percent}%`;
+                        els.ffmpegLoadBar.style.width = `${percent}%`;
+                    }
+                    return URL.createObjectURL(new Blob(chunks, { type }));
+                };
+                const coreURL = await loadAsset(`${baseURL}/ffmpeg-core.js`, 'text/javascript', 'Downloading core', 0, 10);
+                const wasmURL = await loadAsset(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm', 'Downloading engine', 10, 85);
+                els.ffmpegLoadLabel.textContent = 'Starting engine';
                 await ffmpeg.load({
-                    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-                    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+                    coreURL,
+                    wasmURL,
                 });
 
                 ffmpegLoaded = true;
+                els.ffmpegLoadPercent.textContent = '100%';
+                els.ffmpegLoadBar.style.width = '100%';
+                els.ffmpegLoadLabel.textContent = 'FFmpeg ready';
                 els.statusDot.className = "w-2 h-2 rounded-full bg-emerald-400";
                 els.statusText.textContent = "FFmpeg Ready";
             } catch (err) {
                 console.error("FFmpeg Load Error:", err);
+                els.ffmpegLoadLabel.textContent = 'Load failed';
+                els.ffmpegLoadPercent.textContent = '';
+                els.ffmpegLoadBar.className = 'h-full w-full bg-rose-500';
                 els.statusDot.className = "w-2 h-2 rounded-full bg-rose-500";
                 els.statusText.textContent = "Engine Error";
             }
